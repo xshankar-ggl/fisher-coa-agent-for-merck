@@ -1,0 +1,70 @@
+# Google Cloud Build CI/CD Pipeline for ThermoFisher Scientific CoA Chat Agent
+# Stages:
+#   1. Static Syntax & Package Verification
+#   2. Automated 5-Axis Evaluation & Unit Test Gate (pytest / unittest)
+#   3. Hardened Multi-Stage Container Image Build
+#   4. Push Image to Artifact Registry
+#   5. Deploy to Cloud Run v2 with Secret Manager Integration
+
+steps:
+  - id: "lint-and-syntax-check"
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        pip install --no-cache-dir -r requirements.txt
+        python3 -m py_compile thermofisher_agent/*.py app.py tests/test_thermofisher_agent.py
+
+  - id: "automated-evaluation-and-unit-tests"
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    waitFor: ["lint-and-syntax-check"]
+    args:
+      - "-c"
+      - |
+        pip install --no-cache-dir -r requirements.txt pytest
+        pytest -v tests/test_thermofisher_agent.py
+
+  - id: "build-container-image"
+    name: "gcr.io/cloud-builders/docker"
+    waitFor: ["automated-evaluation-and-unit-tests"]
+    args:
+      - "build"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:latest"
+      - "."
+
+  - id: "push-container-image"
+    name: "gcr.io/cloud-builders/docker"
+    waitFor: ["build-container-image"]
+    args:
+      - "push"
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}"
+
+  - id: "deploy-cloud-run"
+    name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    waitFor: ["push-container-image"]
+    entrypoint: "gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE_NAME}"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--set-secrets=GOOGLE_API_KEY=${_SECRET_ID}:latest"
+      - "--set-env-vars=GOOGLE_CLOUD_PROJECT=${PROJECT_ID},THERMOFISHER_GEMINI_SECRET_ID=${_SECRET_ID}"
+      - "--quiet"
+
+substitutions:
+  _REGION: "us-central1"
+  _REPO_NAME: "thermofisher-coa-agent-repo"
+  _SERVICE_NAME: "thermofisher-coa-agent"
+  _SECRET_ID: "thermofisher-gemini-api-key"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
